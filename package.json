@@ -1,45 +1,15 @@
 {
-  "name": "dw-bi-dashboard",
-  "version": "0.1.0",
-  "private": true,
-  "dependencies": {
-    "@testing-library/dom": "^10.4.1",
-    "@testing-library/jest-dom": "^6.9.1",
-    "@testing-library/react": "^16.3.2",
-    "@testing-library/user-event": "^13.5.0",
-    "react": "^19.2.8",
-    "react-dom": "^19.2.8",
-    "react-scripts": "5.0.1",
-    "recharts": "^3.10.1",
-    "web-vitals": "^2.1.4"
-  },
   "scripts": {
-    "start": "react-scripts start",
-    "build": "react-scripts build",
-    "test": "react-scripts test",
-    "eject": "react-scripts eject"
-  },
-  "eslintConfig": {
-    "extends": [
-      "react-app",
-      "react-app/jest"
-    ]
-  },
-  "browserslist": {
-    "production": [
-      ">0.2%",
-      "not dead",
-      "not op_mini all"
-    ],
-    "development": [
-      "last 1 chrome version",
-      "last 1 firefox version",
-      "last 1 safari version"
-    ]
+    "start": "node scripts/start.js",
+    "backend": "npm --prefix dw-bi-backend start",
+    "frontend": "npm --prefix dw-bi-dashboard start",
+    "build": "npm --prefix dw-bi-dashboard run build",
+    "test": "npm --prefix dw-bi-dashboard test"
   },
   "devDependencies": {
     "autoprefixer": "^10.5.4",
+    "concurrently": "^9.1.2",
     "postcss": "^8.5.26",
-    "tailwindcss": "^3.4.19"
+    "tailwindcss": "^4.3.3"
   }
 }

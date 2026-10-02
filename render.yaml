@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: datawise
+    runtime: node
+    plan: free
+    buildCommand: npm install --prefix dw-bi-backend --omit=dev && npm install --prefix dw-bi-dashboard && npm run build --prefix dw-bi-dashboard
+    startCommand: npm start --prefix dw-bi-backend
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MONGODB_URI
+        sync: false
+      - key: MONGODB_DB
+        value: datawise
+      - key: JWT_SECRET
+        generateValue: true
+      - key: SESSION_TTL_DAYS
+        value: "7"
+      - key: EMAIL_VERIFICATION_TTL_HOURS
+        value: "24"
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_SECURE
+        value: "false"
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: SMTP_FROM
+        sync: false
