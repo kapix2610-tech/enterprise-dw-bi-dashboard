@@ -103,6 +103,7 @@ const uploadedFileSchema = new mongoose.Schema({
   sourceId: { type: String, default: null, index: true },
   originalName: String,
   storedName: String,
+  fileData: Buffer,
   mimeType: String,
   size: Number,
   rowCount: Number,
@@ -185,8 +186,12 @@ function userId(req) {
 
 async function loadOwnedDataset(fileId, ownerId) {
   if (!mongoose.isValidObjectId(fileId)) return { error: "Invalid dataset id.", status: 400 };
-  const file = await UploadedFile.findOne({ _id: fileId, userId: ownerId }).lean();
+  const file = await UploadedFile.findOne({ _id: fileId, userId: ownerId });
   if (!file) return { error: "Dataset not found in this workspace.", status: 404 };
+  if (file.fileData) {
+    const parsed = parseFileBuffer(file.fileData, file.originalName);
+    return { rows: parsed.rows.slice(0, 1000), columns: parsed.columns, totals: parsed.totals };
+  }
   const storedName = path.basename(file.storedName || "");
   if (!storedName || storedName !== file.storedName) throw new Error("Stored dataset path is invalid.");
   try {
@@ -350,11 +355,15 @@ async function connectToDatabase() {
 }
 
 function parseFile(filePath, originalName) {
+  return parseFileBuffer(fs.readFileSync(filePath), originalName);
+}
+
+function parseFileBuffer(contents, originalName) {
   let rows;
   if (path.extname(originalName).toLowerCase() === ".json") {
-    rows = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    rows = JSON.parse(contents.toString("utf8"));
   } else {
-    const workbook = XLSX.readFile(filePath, { cellDates: true });
+    const workbook = XLSX.read(contents, { type: "buffer", cellDates: true });
     rows = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]], { defval: "" });
   }
   if (!Array.isArray(rows) || rows.some((row) => !row || typeof row !== "object" || Array.isArray(row))) {
@@ -423,6 +432,7 @@ async function syncRestSource(source) {
             sourceId,
             originalName: `${source.name}.json`,
             storedName,
+            fileData: Buffer.from(serializedRows),
             mimeType: "application/json",
             size: Buffer.byteLength(serializedRows),
             rowCount: rows.length,
@@ -801,7 +811,7 @@ app.post("/api/upload", requireAuth, upload.single("file"), async (req, res) => 
     const analysis = { totals: data.totals, sample: data.rows.slice(0, 5), ...deriveInsights(data.rows) };
     let record;
     try {
-      record = await UploadedFile.create({ userId: userId(req), workspaceId, originalName: req.file.originalname, storedName: req.file.filename, mimeType: req.file.mimetype, size: req.file.size, rowCount: data.rows.length, columns: data.columns, preview: data.rows.slice(0, 20), analysis });
+      record = await UploadedFile.create({ userId: userId(req), workspaceId, originalName: req.file.originalname, storedName: req.file.filename, fileData: await fs.promises.readFile(req.file.path), mimeType: req.file.mimetype, size: req.file.size, rowCount: data.rows.length, columns: data.columns, preview: data.rows.slice(0, 20), analysis });
     } catch (error) {
       await fs.promises.unlink(req.file.path).catch((unlinkError) => {
         if (unlinkError.code !== "ENOENT") console.error("Could not remove unpersisted upload:", unlinkError.message);
@@ -829,8 +839,23 @@ app.get("/api/files/:fileId", requireAuth, async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.fileId)) return res.status(400).json({ error: "Invalid dataset id." });
   if (!databaseRequired(res)) return;
   try {
-    const file = await UploadedFile.findOne({ _id: req.params.fileId, userId: userId(req) }).lean();
+    const file = await UploadedFile.findOne({ _id: req.params.fileId, userId: userId(req) });
     if (!file) return res.status(404).json({ error: "Dataset not found in this workspace." });
+    if (file.fileData) {
+      const parsed = parseFileBuffer(file.fileData, file.originalName);
+      return res.json({
+        fileId: file._id,
+        workspaceId: file.workspaceId || "default",
+        sourceId: file.sourceId || null,
+        filename: file.originalName,
+        rowCount: parsed.rows.length,
+        columns: parsed.columns,
+        rows: parsed.rows.slice(0, 1000),
+        analysis: file.analysis,
+        createdAt: file.createdAt,
+        updatedAt: file.updatedAt,
+      });
+    }
     const storedName = path.basename(file.storedName || "");
     if (!storedName || storedName !== file.storedName) {
       console.error("Rejected unsafe stored file name for dataset:", file._id.toString());
@@ -1021,4 +1046,4 @@ if (require.main === module) {
     process.exitCode = 1;
   });
 }
-module.exports = { app, parseFile, summarizeData, validateConfiguration };
+module.exports = { app, parseFile, parseFileBuffer, summarizeData, validateConfiguration };
