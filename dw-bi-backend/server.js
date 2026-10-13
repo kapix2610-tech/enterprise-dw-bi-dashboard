@@ -47,6 +47,8 @@ const PORT = process.env.PORT || 5000;
 const MONGODB_URI = process.env.MONGODB_URI;
 const MONGODB_DB = process.env.MONGODB_DB || "datawise";
 const MONGODB_RETRY_MS = Number(process.env.MONGODB_RETRY_MS || 15000);
+let reconnectTimer = null;
+let databaseConnectPromise = null;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
 const META_API_KEY = process.env.META_API_KEY;
@@ -83,7 +85,9 @@ const pendingRegistrationSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true, maxlength: 80 },
   email: { type: String, required: true, lowercase: true, trim: true, unique: true, index: true },
   passwordHash: { type: String, required: true },
-  verificationTokenHash: { type: String, required: true, index: true },
+  verificationTokenHash: { type: String, index: true },
+  verificationCodeHash: { type: String, index: true },
+  verificationAttempts: { type: Number, default: 0 },
   emailVerificationHandoffTokenHash: { type: String },
   lastSentAt: { type: Date, required: true },
   expiresAt: { type: Date, required: true, expires: 0 },
@@ -274,6 +278,10 @@ function hashVerificationToken(token) {
   return crypto.createHash("sha256").update(token).digest("hex");
 }
 
+function hashVerificationCode(email, code) {
+  return crypto.createHmac("sha256", JWT_SECRET).update(`${email.toLowerCase().trim()}:${code}`).digest("hex");
+}
+
 async function validateEmailDomain(email) {
   const domain = email.slice(email.lastIndexOf("@") + 1).toLowerCase();
   try {
@@ -292,18 +300,17 @@ async function validateEmailDomain(email) {
   }
 }
 
-async function sendVerificationEmail(registration, rawToken) {
+async function sendVerificationEmail(registration, code) {
   if (!mailTransport) throw new Error("Email verification is not configured. Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, and SMTP_FROM.");
-  const link = `${EMAIL_VERIFICATION_BASE_URL}/?verify=${encodeURIComponent(rawToken)}`;
   const safeName = registration.name.replace(/[&<>"']/g, (character) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;",
   })[character]);
   await mailTransport.sendMail({
     from: SMTP_FROM,
     to: registration.email,
-    subject: "Confirm your Datawise account",
-    text: `Hello ${registration.name},\n\nConfirm your email address to activate your Datawise account:\n${link}\n\nThis link expires in ${EMAIL_VERIFICATION_TTL_HOURS} hours. If you did not request this account, you can ignore this message.`,
-    html: `<p>Hello ${safeName},</p><p>Confirm your email address to activate your Datawise account.</p><p><a href="${link}">Confirm my email</a></p><p>This link expires in ${EMAIL_VERIFICATION_TTL_HOURS} hours. If you did not request this account, you can ignore this message.</p>`,
+    subject: "Your Datawise verification code",
+    text: `Hello ${registration.name},\n\nEnter this code in Datawise to verify your email address: ${code}\n\nThe code expires in ${EMAIL_VERIFICATION_TTL_HOURS} hours. If you did not request this account, you can ignore this message.`,
+    html: `<p>Hello ${safeName},</p><p>Enter this code in Datawise to verify your email address:</p><p style="font-size:28px;font-weight:bold;letter-spacing:6px">${code}</p><p>The code expires in ${EMAIL_VERIFICATION_TTL_HOURS} hours. If you did not request this account, you can ignore this message.</p>`,
   });
 }
 
@@ -314,7 +321,7 @@ async function createPendingRegistration({ name, email, passwordHash, handoffTok
     error.code = "EMAIL_COOLDOWN";
     throw error;
   }
-  const rawToken = crypto.randomBytes(32).toString("hex");
+  const code = crypto.randomInt(0, 1000000).toString().padStart(6, "0");
   const expiresAt = new Date(Date.now() + EMAIL_VERIFICATION_TTL_HOURS * 60 * 60 * 1000);
   const lastSentAt = new Date();
   const registration = await PendingRegistration.findOneAndUpdate(
@@ -323,7 +330,8 @@ async function createPendingRegistration({ name, email, passwordHash, handoffTok
       name,
       email,
       passwordHash,
-      verificationTokenHash: hashVerificationToken(rawToken),
+      verificationCodeHash: hashVerificationCode(email, code),
+      verificationAttempts: 0,
       emailVerificationHandoffTokenHash: handoffToken ? hashVerificationToken(handoffToken) : undefined,
       lastSentAt,
       expiresAt,
@@ -331,7 +339,7 @@ async function createPendingRegistration({ name, email, passwordHash, handoffTok
     { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true },
   );
   try {
-    await sendVerificationEmail(registration, rawToken);
+    await sendVerificationEmail(registration, code);
     return registration;
   } catch (error) {
     await PendingRegistration.deleteOne({ _id: registration._id });
@@ -339,19 +347,51 @@ async function createPendingRegistration({ name, email, passwordHash, handoffTok
   }
 }
 
+function scheduleDatabaseReconnect() {
+  if (!MONGODB_URI || reconnectTimer || mongoose.connection.readyState === 1) return;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    if (mongoose.connection.readyState === 0) void connectToDatabase();
+    else if (mongoose.connection.readyState === 3) scheduleDatabaseReconnect();
+  }, MONGODB_RETRY_MS);
+  reconnectTimer.unref();
+}
+
+mongoose.connection.on("connected", () => {
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+  console.log(`MongoDB connected (database: ${MONGODB_DB})`);
+  void syncDueRestSources();
+});
+mongoose.connection.on("disconnected", () => {
+  console.error("MongoDB disconnected. The application will retry automatically.");
+  scheduleDatabaseReconnect();
+});
+
 async function connectToDatabase() {
-  try {
-    await mongoose.connect(MONGODB_URI, {
-      dbName: MONGODB_DB,
-      serverSelectionTimeoutMS: 10000,
-    });
-    console.log(`MongoDB connected (database: ${MONGODB_DB})`);
-    void syncDueRestSources();
-  } catch (error) {
-    console.error("MongoDB connection failed. Authentication and persistence are disabled until it is reachable:", error.message);
-    const retry = setTimeout(() => { void connectToDatabase(); }, MONGODB_RETRY_MS);
-    retry.unref();
-  }
+  if (!MONGODB_URI || mongoose.connection.readyState === 1) return;
+  if (databaseConnectPromise) return databaseConnectPromise;
+  databaseConnectPromise = (async () => {
+    try {
+      await mongoose.connect(MONGODB_URI, {
+        dbName: MONGODB_DB,
+        serverSelectionTimeoutMS: 10000,
+      });
+    } catch (error) {
+      console.error("MongoDB connection failed. Authentication and persistence are disabled until it is reachable:", error.message);
+      scheduleDatabaseReconnect();
+    } finally {
+      databaseConnectPromise = null;
+    }
+  })();
+  return databaseConnectPromise;
+}
+
+function createExcelWorkbookBuffer(rows, columns) {
+  const workbook = XLSX.utils.book_new();
+  const sheet = XLSX.utils.json_to_sheet(rows, { header: columns });
+  XLSX.utils.book_append_sheet(workbook, sheet, "Data");
+  return XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
 }
 
 function parseFile(filePath, originalName) {
@@ -548,7 +588,7 @@ app.post("/api/auth/signup", async (req, res) => {
     return res.status(202).json({
       verificationRequired: true,
       email: normalizedEmail,
-      message: "Check your inbox and confirm your email to activate your account.",
+      message: "Check your inbox for a 6-digit verification code.",
     });
   } catch (error) {
     if (error.code === 11000) return res.status(409).json({ error: "An account with this email already exists." });
@@ -563,18 +603,33 @@ app.post("/api/auth/signup", async (req, res) => {
 });
 
 app.post("/api/auth/verify-email", async (req, res) => {
+  const code = req.body?.code;
+  const email = req.body?.email;
   const token = req.body?.token;
-  if (typeof token !== "string" || !/^[a-f0-9]{64}$/i.test(token)) {
-    return res.status(400).json({ error: "The email confirmation link is invalid or expired. Request a new one." });
+  const isCode = typeof code === "string" && /^\d{6}$/.test(code) && typeof email === "string" && /^\S+@\S+\.\S+$/.test(email.trim());
+  const isLegacyToken = typeof token === "string" && /^[a-f0-9]{64}$/i.test(token);
+  if (!isCode && !isLegacyToken) {
+    return res.status(400).json({ error: "The email confirmation code or link is invalid or expired. Request a new code." });
   }
   if (!databaseRequired(res)) return;
   try {
-    const registration = await PendingRegistration.findOne({
+    const registration = await PendingRegistration.findOne(isCode ? {
+      email: email.toLowerCase().trim(),
+      verificationCodeHash: hashVerificationCode(email, code),
+      verificationAttempts: { $lt: 5 },
+      expiresAt: { $gt: new Date() },
+    } : {
       verificationTokenHash: hashVerificationToken(token),
       expiresAt: { $gt: new Date() },
     });
     if (!registration) {
-      return res.status(400).json({ error: "The email confirmation link is invalid or expired. Request a new one." });
+      if (isCode) {
+        await PendingRegistration.updateOne(
+          { email: email.toLowerCase().trim(), expiresAt: { $gt: new Date() }, verificationAttempts: { $lt: 5 } },
+          { $inc: { verificationAttempts: 1 } },
+        );
+      }
+      return res.status(400).json({ error: "The verification code is invalid or expired. Request a new code." });
     }
     if (await User.exists({ email: registration.email })) {
       await PendingRegistration.deleteOne({ _id: registration._id });
@@ -594,7 +649,7 @@ app.post("/api/auth/verify-email", async (req, res) => {
   } catch (error) {
     if (error.code === 11000) return res.status(409).json({ error: "An account with this email already exists." });
     console.error("Could not verify account email:", error.message);
-    return res.status(500).json({ error: "Could not confirm this email. Please request a new link." });
+    return res.status(500).json({ error: "Could not confirm this email. Please request a new code." });
   }
 });
 
@@ -633,14 +688,16 @@ app.post("/api/auth/resend-verification", async (req, res) => {
   try {
     const registration = await PendingRegistration.findOne({ email: email.toLowerCase().trim() });
     if (registration && Date.now() - registration.lastSentAt.getTime() >= EMAIL_VERIFICATION_COOLDOWN_MS) {
-      const rawToken = crypto.randomBytes(32).toString("hex");
-      registration.verificationTokenHash = hashVerificationToken(rawToken);
+      const code = crypto.randomInt(0, 1000000).toString().padStart(6, "0");
+      registration.verificationCodeHash = hashVerificationCode(registration.email, code);
+      registration.verificationTokenHash = undefined;
+      registration.verificationAttempts = 0;
       registration.lastSentAt = new Date();
       registration.expiresAt = new Date(Date.now() + EMAIL_VERIFICATION_TTL_HOURS * 60 * 60 * 1000);
       await registration.save();
-      await sendVerificationEmail(registration, rawToken);
+      await sendVerificationEmail(registration, code);
     }
-    return res.status(202).json({ message: "If this address has an eligible pending registration, a confirmation link has been sent." });
+    return res.status(202).json({ message: "If this address has an eligible pending registration, a verification code has been sent." });
   } catch (error) {
     console.error("Could not resend verification email:", error.message);
     return res.status(503).json({ error: "Could not send a new confirmation email. Please check the SMTP configuration." });
@@ -660,7 +717,7 @@ app.post("/api/auth/login", async (req, res) => {
     if (!user) {
       const pending = await PendingRegistration.findOne({ email: normalizedEmail }).select("+passwordHash");
       if (pending && await bcrypt.compare(password, pending.passwordHash)) {
-        return res.status(403).json({ error: "Confirm your email address using the link we sent before signing in." });
+        return res.status(403).json({ error: "Enter the verification code we emailed you before signing in." });
       }
       return res.status(401).json({ error: "Email or password is incorrect." });
     }
@@ -886,6 +943,36 @@ app.get("/api/files/:fileId", requireAuth, async (req, res) => {
   }
 });
 
+app.get("/api/files/:fileId/export.xlsx", requireAuth, async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.fileId)) return res.status(400).json({ error: "Invalid dataset id." });
+  if (!databaseRequired(res)) return;
+  try {
+    const file = await UploadedFile.findOne({ _id: req.params.fileId, userId: userId(req) });
+    if (!file) return res.status(404).json({ error: "Dataset not found in this account." });
+    let parsed;
+    if (file.fileData) {
+      parsed = parseFileBuffer(file.fileData, file.originalName);
+    } else {
+      const storedName = path.basename(file.storedName || "");
+      if (!storedName || storedName !== file.storedName) return res.status(500).json({ error: "Stored dataset file could not be opened." });
+      parsed = parseFile(path.join(uploadsDirectory, storedName), file.originalName);
+    }
+    const workbook = createExcelWorkbookBuffer(parsed.rows, parsed.columns);
+    const baseName = path.basename(file.originalName || "dataset", path.extname(file.originalName || ""))
+      .replace(/[^a-z0-9_-]+/gi, "-") || "dataset";
+    res.set({
+      "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "Content-Disposition": `attachment; filename="${baseName}.xlsx"`,
+      "Content-Length": workbook.length,
+    });
+    return res.send(workbook);
+  } catch (error) {
+    if (error.code === "ENOENT") return res.status(410).json({ error: "The original dataset file is no longer available." });
+    console.error("Could not export dataset to Excel:", error.message);
+    return res.status(500).json({ error: "Could not create the Excel workbook." });
+  }
+});
+
 async function deleteStoredFiles(files) {
   const failures = [];
   for (const file of files) {
@@ -1046,4 +1133,4 @@ if (require.main === module) {
     process.exitCode = 1;
   });
 }
-module.exports = { app, parseFile, parseFileBuffer, summarizeData, validateConfiguration };
+module.exports = { app, createExcelWorkbookBuffer, parseFile, parseFileBuffer, summarizeData, validateConfiguration };

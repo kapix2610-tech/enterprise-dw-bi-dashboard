@@ -1,4 +1,4 @@
-import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import App from './App';
 
 test('renders the analytics dashboard', async () => {
@@ -77,18 +77,11 @@ test('confirms an emailed account link and starts its session', async () => {
   expect(window.location.search).toBe('');
 });
 
-test('starts the laptop session after confirmation completes on another device', async () => {
+test('verifies signup with the code sent by email', async () => {
   localStorage.clear();
-  const originalCrypto = window.crypto;
-  Object.defineProperty(window, 'crypto', {
-    configurable: true,
-    value: { getRandomValues: (bytes) => bytes.fill(7) },
-  });
-  let signupRequest;
-  let claimRequest;
-  let releaseClaim;
+  let verificationRequest;
   const confirmedSession = {
-    token: 'laptop-session',
+    token: 'verified-session',
     user: { id: 'new-user', name: 'New User', email: 'new@example.com' },
   };
   global.fetch = jest.fn((url, options = {}) => {
@@ -96,14 +89,11 @@ test('starts the laptop session after confirmation completes on another device',
       return Promise.resolve({ ok: true, json: async () => ({ database: 'connected' }) });
     }
     if (url.endsWith('/api/auth/signup')) {
-      signupRequest = options;
-      return Promise.resolve({ ok: true, json: async () => ({ verificationRequired: true, email: 'new@example.com' }) });
+      return Promise.resolve({ ok: true, json: async () => ({ verificationRequired: true, email: 'new@example.com', message: 'Check your inbox for a 6-digit verification code.' }) });
     }
-    if (url.endsWith('/api/auth/claim-email-verification')) {
-      claimRequest = options;
-      return new Promise((resolve) => {
-        releaseClaim = () => resolve({ ok: true, json: async () => confirmedSession });
-      });
+    if (url.endsWith('/api/auth/verify-email')) {
+      verificationRequest = options;
+      return Promise.resolve({ ok: true, json: async () => confirmedSession });
     }
     if (url.endsWith('/api/auth/me')) {
       return Promise.resolve({ ok: true, json: async () => ({ user: confirmedSession.user }) });
@@ -118,15 +108,11 @@ test('starts the laptop session after confirmation completes on another device',
   fireEvent.change(screen.getByLabelText('Password', { selector: 'input' }), { target: { value: 'password123' } });
   fireEvent.click(screen.getByRole('button', { name: /create account/i }));
 
-  expect(await screen.findByText(/we sent a confirmation link/i)).toBeInTheDocument();
-  await waitFor(() => expect(releaseClaim).toBeDefined());
-  const signupHandoffToken = JSON.parse(signupRequest.body).handoffToken;
-  expect(signupHandoffToken).toMatch(/^[a-f0-9]{64}$/);
-  expect(JSON.parse(claimRequest.body).handoffToken).toBe(signupHandoffToken);
-
-  await act(async () => releaseClaim());
+  expect(await screen.findByText(/we sent a 6-digit code/i)).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText(/email verification code/i), { target: { value: '123456' } });
+  fireEvent.click(screen.getByRole('button', { name: /verify code/i }));
+  await waitFor(() => expect(verificationRequest).toBeDefined());
+  expect(JSON.parse(verificationRequest.body)).toEqual({ email: 'new@example.com', code: '123456' });
   expect(await screen.findByRole('heading', { name: /what should your dashboard help you understand/i })).toBeInTheDocument();
-  expect(localStorage.getItem('datawise-token')).toBe('laptop-session');
-  if (originalCrypto) Object.defineProperty(window, 'crypto', { configurable: true, value: originalCrypto });
-  else delete window.crypto;
+  expect(localStorage.getItem('datawise-token')).toBe('verified-session');
 });

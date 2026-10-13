@@ -124,6 +124,7 @@ function App() {
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showChat, setShowChat] = useState(false);
+  const [excelExportStatus, setExcelExportStatus] = useState("");
 
   useEffect(() => {
     if (!token) {
@@ -328,6 +329,32 @@ function App() {
     }
   };
 
+  const handleExportExcel = async () => {
+    if (!analysis?.fileId || !token) return;
+    setExcelExportStatus("Preparing Excel file…");
+    try {
+      const response = await fetch(`${API_URL}/api/files/${analysis.fileId}/export.xlsx`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!response.ok) {
+        const result = await response.json().catch(() => ({}));
+        throw new Error(result.error || "Could not export this dataset.");
+      }
+      const downloadUrl = URL.createObjectURL(await response.blob());
+      const filename = (analysis.sourceName || "dataset").replace(/\.[^.]+$/, "").replace(/[^a-z0-9_-]+/gi, "-") || "dataset";
+      const link = document.createElement("a");
+      link.href = downloadUrl;
+      link.download = `${filename}.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
+      setExcelExportStatus("Excel file downloaded.");
+    } catch (error) {
+      setExcelExportStatus(error.message || "Could not export this dataset.");
+    }
+  };
+
   const openHistoricalDataset = (dataset) => {
     const datasetWorkspaceId = dataset.workspaceId || "default";
     const targetWorkspace = datasetWorkspaceId === "default"
@@ -398,7 +425,7 @@ function App() {
         onEditWorkspace={() => { setEditingWorkspaceId(workspace.id); setShowWorkspaceSetup(true); }}
         onDeleteWorkspace={deleteWorkspace}
       />
-      <Navbar activePage={activePage} user={user} onAddData={() => setShowImport(true)} onLogout={handleLogout} darkMode={darkMode} onToggleTheme={toggleTheme} onOpenSettings={() => setShowSettings(true)} onOpenAI={() => setShowChat(true)} />
+      <Navbar activePage={activePage} user={user} onAddData={() => setShowImport(true)} onLogout={handleLogout} darkMode={darkMode} onToggleTheme={toggleTheme} onOpenSettings={() => setShowSettings(true)} onOpenAI={() => setShowChat(true)} onExportExcel={handleExportExcel} canExportExcel={Boolean(analysis?.fileId)} excelExportStatus={excelExportStatus} />
 
       <main className="main-content">
         {activePage === "Data sources" && <DataSources

@@ -55,6 +55,7 @@
 .verification-pending p { margin: 9px 0; color: #7b89a0; font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
 .verification-pending p b { color: #43516d; }
 .verification-pending .login-button { margin-top: 8px; }
+.resend-code-button { margin-top: 13px; border: 0; color: #3568e7; background: transparent; font-size: 11px; font-weight: 700; }.resend-code-button:disabled { opacity: .55; cursor: wait; }
 .dark-mode .adaptive-focus-item, .dark-mode .adaptive-focus-goal { border-color: #293653; color: #c2cde2; background: #10192f; }
 .dark-mode .history-row-actions button, .dark-mode .history-preview-actions button { border-color: #33415f; color: #c2cde2; background: #10192f; }
 .dark-mode .verification-pending { border-color: #293653; background: #151f38; }

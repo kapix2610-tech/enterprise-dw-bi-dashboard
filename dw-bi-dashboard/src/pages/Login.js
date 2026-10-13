@@ -1,10 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { API_URL } from "../config";
-
-function createHandoffToken() {
-  const bytes = window.crypto.getRandomValues(new Uint8Array(32));
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
 
 function Login({ onAuthenticated }) {
   const [mode, setMode] = useState("login");
@@ -18,10 +13,8 @@ function Login({ onAuthenticated }) {
   const [emailVerificationConfigured, setEmailVerificationConfigured] = useState(false);
   const [healthAttempt, setHealthAttempt] = useState(0);
   const [verificationPending, setVerificationPending] = useState("");
-  const [handoffToken, setHandoffToken] = useState("");
+  const [verificationCode, setVerificationCode] = useState("");
   const [resendMessage, setResendMessage] = useState("");
-  const onAuthenticatedRef = useRef(onAuthenticated);
-  onAuthenticatedRef.current = onAuthenticated;
 
   useEffect(() => {
     let active = true;
@@ -47,38 +40,6 @@ function Login({ onAuthenticated }) {
     };
   }, [healthAttempt]);
 
-  useEffect(() => {
-    if (!verificationPending || !handoffToken) return undefined;
-    let active = true;
-    let checking = false;
-    const checkConfirmation = async () => {
-      if (checking) return;
-      checking = true;
-      try {
-        const response = await fetch(`${API_URL}/api/auth/claim-email-verification`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ handoffToken }),
-        });
-        const result = await response.json().catch(() => ({}));
-        if (active && response.ok && result.token && result.user) {
-          active = false;
-          onAuthenticatedRef.current(result);
-        }
-      } catch {
-        // Retry automatically while the confirmation screen remains open.
-      } finally {
-        checking = false;
-      }
-    };
-    void checkConfirmation();
-    const timer = setInterval(checkConfirmation, 2000);
-    return () => {
-      active = false;
-      clearInterval(timer);
-    };
-  }, [verificationPending, handoffToken]);
-
   const handleSubmit = async (event) => {
     event.preventDefault();
     setError("");
@@ -87,19 +48,18 @@ function Login({ onAuthenticated }) {
     if (mode === "signup" && password.length < 8) return setError("Password must be at least 8 characters.");
     setBusy(true);
     try {
-      const nextHandoffToken = mode === "signup" ? createHandoffToken() : "";
       const response = await fetch(`${API_URL}/api/auth/${mode}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, email: email.trim(), password, ...(nextHandoffToken ? { handoffToken: nextHandoffToken } : {}) }),
+        body: JSON.stringify({ name, email: email.trim(), password }),
       });
       const result = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(result.error || "Authentication failed.");
       if (mode === "signup" && result.verificationRequired) {
         setVerificationPending(result.email || email.trim());
-        setHandoffToken(nextHandoffToken);
+        setVerificationCode("");
         setPassword("");
-        setResendMessage(result.message || "Check your inbox for the email confirmation link.");
+        setResendMessage(result.message || "Check your inbox for the 6-digit verification code.");
         return;
       }
       onAuthenticated(result);
@@ -113,10 +73,31 @@ function Login({ onAuthenticated }) {
     }
   };
 
+  const verifyEmailCode = async (event) => {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      const response = await fetch(`${API_URL}/api/auth/verify-email`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: verificationPending, code: verificationCode.trim() }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error || "Email verification failed.");
+      onAuthenticated(result);
+    } catch (requestError) {
+      setError(requestError.message || "Could not verify this code.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const resendConfirmation = async () => {
     setBusy(true);
     setError("");
     setResendMessage("");
+    setVerificationCode("");
     try {
       const response = await fetch(`${API_URL}/api/auth/resend-verification`, {
         method: "POST",
@@ -166,19 +147,25 @@ function Login({ onAuthenticated }) {
           </div>
           <span className="eyebrow">{mode === "login" ? "WELCOME BACK" : "GET STARTED"}</span>
           <h2 id="login-heading">{mode === "login" ? "Sign in to your workspace" : "Create your workspace"}</h2>
-          <p>{verificationPending ? `Confirm your email address to activate your account.` : mode === "login" ? "Use your registered account to continue." : "We’ll send a confirmation link before creating your account."}</p>
+          <p>{verificationPending ? "Enter the code sent to your email address to activate your account." : mode === "login" ? "Use your registered account to continue." : "We’ll email you a code to verify your address."}</p>
         </div>
 
         {verificationPending ? (
           <div className="verification-pending" role="status">
             <span className="verification-icon">✉</span>
             <strong>Check your inbox</strong>
-            <p>We sent a confirmation link to <b>{verificationPending}</b>. Your account is created only after you confirm that email.</p>
+            <p>We sent a 6-digit code to <b>{verificationPending}</b>. Your account opens after the code is verified.</p>
             {resendMessage && <p>{resendMessage}</p>}
             {error && <p className="form-error" role="alert">{error}</p>}
-            <button className="login-button" type="button" onClick={resendConfirmation} disabled={busy}>
-              {busy ? "Sending…" : "Resend confirmation email"}
-            </button>
+            <form onSubmit={verifyEmailCode}>
+              <label htmlFor="verification-code">Email verification code
+                <input id="verification-code" type="text" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} placeholder="000000" value={verificationCode} onChange={(event) => setVerificationCode(event.target.value.replace(/\D/g, "").slice(0, 6))} required />
+              </label>
+              <button className="login-button" type="submit" disabled={busy || verificationCode.length !== 6}>
+                {busy ? "Verifying…" : "Verify code"}<span aria-hidden="true">→</span>
+              </button>
+            </form>
+            <button className="resend-code-button" type="button" onClick={resendConfirmation} disabled={busy}>Resend code</button>
           </div>
         ) : <form onSubmit={handleSubmit}>
           {mode === "signup" && (
@@ -206,7 +193,7 @@ function Login({ onAuthenticated }) {
 
         <p className="auth-switch">
           {mode === "login" ? "New to Datawise?" : "Already have an account?"}{" "}
-          <button type="button" onClick={() => { setVerificationPending(""); setHandoffToken(""); setResendMessage(""); setMode(mode === "login" ? "signup" : "login"); setError(""); }}>
+          <button type="button" onClick={() => { setVerificationPending(""); setVerificationCode(""); setResendMessage(""); setMode(mode === "login" ? "signup" : "login"); setError(""); }}>
             {mode === "login" ? "Create account" : "Sign in"}
           </button>
         </p>

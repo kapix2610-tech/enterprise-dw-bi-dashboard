@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const XLSX = require("xlsx");
 const mongoose = require("mongoose");
-const { app, parseFile, parseFileBuffer, summarizeData } = require("./server");
+const { app, createExcelWorkbookBuffer, parseFile, parseFileBuffer, summarizeData } = require("./server");
 const {
   createCredentialCipher,
   extractApiRows,
@@ -47,6 +47,16 @@ test("parses JSON and spreadsheet buffers for durable dataset storage", () => {
   const spreadsheet = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
   const parsedSpreadsheet = parseFileBuffer(spreadsheet, "data.xlsx");
   assert.equal(parsedSpreadsheet.totals.revenue, 35);
+});
+
+test("exports all dataset rows to an Excel workbook", () => {
+  const buffer = createExcelWorkbookBuffer(
+    [{ product: "A", revenue: 1200 }, { product: "B", revenue: 800 }],
+    ["product", "revenue"],
+  );
+  const workbook = XLSX.read(buffer, { type: "buffer" });
+  const rows = XLSX.utils.sheet_to_json(workbook.Sheets.Data);
+  assert.deepEqual(rows, [{ product: "A", revenue: 1200 }, { product: "B", revenue: 800 }]);
 });
 
 test("extracts rows from common REST response shapes and rejects malformed data", () => {
