@@ -28,7 +28,9 @@ const sourceSyncsInProgress = new Set();
 
 const app = express();
 // Configure file storage
-const uploadsDirectory = path.join(__dirname, "uploads");
+const uploadsDirectory = process.env.VERCEL
+  ? path.join(require("os").tmpdir(), "datawise-uploads")
+  : path.join(__dirname, "uploads");
 fs.mkdirSync(uploadsDirectory, { recursive: true });
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -61,7 +63,7 @@ const SESSION_TTL_DAYS = Number(process.env.SESSION_TTL_DAYS || 7);
 const EMAIL_VERIFICATION_TTL_HOURS = Number(process.env.EMAIL_VERIFICATION_TTL_HOURS || 24);
 const EMAIL_VERIFICATION_HANDOFF_TTL_MS = 24 * 60 * 60 * 1000;
 const EMAIL_VERIFICATION_COOLDOWN_MS = 60 * 1000;
-const EMAIL_VERIFICATION_BASE_URL = (process.env.FRONTEND_URL || process.env.RENDER_EXTERNAL_URL || process.env.CORS_ORIGIN?.split(",")[0] || "http://localhost:3000").replace(/\/+$/, "");
+const EMAIL_VERIFICATION_BASE_URL = (process.env.FRONTEND_URL || (process.env.VERCEL_URL && `https://${process.env.VERCEL_URL}`) || process.env.RENDER_EXTERNAL_URL || process.env.CORS_ORIGIN?.split(",")[0] || "http://localhost:3000").replace(/\/+$/, "");
 const SMTP_HOST = process.env.SMTP_HOST;
 const SMTP_USER = process.env.SMTP_USER;
 const SMTP_PASS = process.env.SMTP_PASS;
@@ -150,7 +152,7 @@ const dataSourceSchema = new mongoose.Schema({
 dataSourceSchema.index({ userId: 1, workspaceId: 1 }, { unique: true });
 const DataSource = mongoose.models.DataSource || mongoose.model("DataSource", dataSourceSchema);
 // Middleware
-const allowedOrigins = [...(process.env.CORS_ORIGIN || "http://localhost:3000,http://localhost:3001").split(","), process.env.RENDER_EXTERNAL_URL]
+const allowedOrigins = [...(process.env.CORS_ORIGIN || "http://localhost:3000,http://localhost:3001").split(","), process.env.RENDER_EXTERNAL_URL, process.env.VERCEL_URL && `https://${process.env.VERCEL_URL}`]
   .filter(Boolean)
   .map((origin) => origin.trim())
   .filter(Boolean);
@@ -1127,10 +1129,15 @@ async function start() {
   await connectToDatabase();
 }
 
+async function serverlessHandler(req, res) {
+  await connectToDatabase();
+  return app(req, res);
+}
+
 if (require.main === module) {
   start().catch((error) => {
     console.error(error.message);
     process.exitCode = 1;
   });
 }
-module.exports = { app, createExcelWorkbookBuffer, parseFile, parseFileBuffer, summarizeData, validateConfiguration };
+module.exports = { app, createExcelWorkbookBuffer, parseFile, parseFileBuffer, serverlessHandler, summarizeData, validateConfiguration };
