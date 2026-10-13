@@ -2,6 +2,7 @@
   "buildCommand": "npm install --prefix dw-bi-backend --omit=dev && npm install --prefix dw-bi-dashboard && npm run build --prefix dw-bi-dashboard",
   "outputDirectory": "dw-bi-dashboard/build",
   "rewrites": [
+    { "source": "/api/:path*", "destination": "/api/index?path=:path*" },
     { "source": "/(.*)", "destination": "/index.html" }
   ]
 }
